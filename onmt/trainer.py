@@ -100,6 +100,7 @@ class Trainer(object):
         self.gpu_verbose_level = gpu_verbose_level
         self.report_manager = report_manager
         self.model_saver = model_saver
+        self.shard_val_loss = self.trunc_size > 0
 
         assert grad_accum_count > 0
         if grad_accum_count > 1:
@@ -236,8 +237,12 @@ class Trainer(object):
             outputs, attns = self.model(src, tgt, src_lengths)
 
             # Compute loss.
-            batch_stats = self.valid_loss.monolithic_compute_loss(
-                batch, outputs, attns)
+            if self.shard_val_loss:
+                batch_stats = self.valid_loss.sharded_compute_valid_loss(
+                    batch, outputs, attns, 0, tgt.size(0), self.shard_size)
+            else:
+                batch_stats = self.valid_loss.monolithic_compute_loss(
+                    batch, outputs, attns)
 
             # Update statistics.
             stats.update(batch_stats)
@@ -280,7 +285,7 @@ class Trainer(object):
                 if self.grad_accum_count == 1:
                     self.model.zero_grad()
                 outputs, attns = \
-                    self.model(src, tgt, src_lengths)
+                    self.model(src, tgt, src_lengths, no_init_decoder=(j > 0))
 
                 # 3. Compute loss in shards for memory efficiency.
                 batch_stats = self.train_loss.sharded_compute_loss(

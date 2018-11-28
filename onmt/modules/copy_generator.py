@@ -4,7 +4,7 @@ import torch.nn as nn
 
 import onmt.inputters as inputters
 from onmt.utils.misc import aeq
-from onmt.utils.loss import LossComputeBase
+from onmt.utils.loss import LossComputeBase, shards
 
 
 class CopyGenerator(nn.Module):
@@ -187,19 +187,21 @@ class CopyGeneratorLossCompute(LossComputeBase):
                                 batch.src_map)
         loss = self.criterion(scores, align, target)
 
-        # this block does not depend on the loss value computed above
-        # and is used only for stats
-        scores_data = inputters.TextDataset.collapse_copy_scores(
-            self._unbottle(scores.clone(), batch.batch_size),
-            batch, self.tgt_vocab, batch.dataset.src_vocabs)
-        scores_data = self._bottle(scores_data)
+        # this just doesn't seem worth it
+        # # this block does not depend on the loss value computed above
+        # # and is used only for stats
+        # scores_data = inputters.TextDataset.collapse_copy_scores(
+        #     self._unbottle(scores.clone(), batch.batch_size),
+        #     batch, self.tgt_vocab, batch.dataset.src_vocabs)
+        # scores_data = self._bottle(scores_data)
+        scores_data = self._bottle(scores.detach())
 
         # this block does not depend on the loss value computed above
         # and is used only for stats
         # Correct target copy token instead of <unk>
         # tgt[i] = align[i] + len(tgt_vocab)
         # for i such that tgt[i] == 0 and align[i] != 0
-        target_data = target.clone()
+        target_data = target.detach() #target.clone()
         unk = self.criterion.unk_index
         correct_mask = (target_data == unk) & (align != unk)
         offset_align = align[correct_mask] + len(self.tgt_vocab)
@@ -220,3 +222,15 @@ class CopyGeneratorLossCompute(LossComputeBase):
             loss = loss.sum()
 
         return loss, stats
+
+
+    def sharded_compute_valid_loss(self, batch, output, attns,
+                                   cur_trunc, trunc_size, shard_size):
+        batch_stats = onmt.utils.Statistics()
+        range_ = (cur_trunc, cur_trunc + trunc_size)
+        shard_state = self._make_shard_state(batch, output, range_, attns)
+        for shard in shards(shard_state, shard_size):
+            loss, stats = self._compute_loss(batch, **shard)
+            #loss.div(float(normalization)).backward()
+            batch_stats.update(stats)
+        return batch_stats
